@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <cJSON.h>
+
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_console.h"
@@ -42,9 +44,13 @@ struct buses_t {
     int buses_num;
     SemaphoreHandle_t mutex;
     QueueHandle_t measurement_queue;
-    float measurements[ONEWIRE_MAX_BUS][ONEWIRE_MAX_DS18B20];
-    portMUX_TYPE spinLock;
     TaskHandle_t measure_handle;
+};
+
+typedef struct ds18b20_measurements_t ds18b20_measurements_t;
+struct ds18b20_measurements_t {
+    float measurements[ONEWIRE_MAX_BUS][ONEWIRE_MAX_DS18B20];
+    //portMUX_TYPE spinLock;
 };
 
 typedef struct ds18b20_measurement_t ds18b20_measurement_t;
@@ -62,8 +68,12 @@ struct bus_config_t{
 
 static buses_t buses = {
     .bus = {{0}},
-    .buses_num = 0,
-    .spinLock = portMUX_INITIALIZER_UNLOCKED
+    .buses_num = 0
+};
+
+static ds18b20_measurements_t measurements = {
+    .measurements = {{0}}//,
+    //.spinLock = portMUX_INITIALIZER_UNLOCKED
 };
 
 static inline void set_nth_bit(uint *flag, int n) {
@@ -269,6 +279,35 @@ FAIL:
     return ESP_FAIL;
 }
 
+static esp_err_t _bus_read_cached(int busid, int devid, float* temperature, int* time) {
+    TickType_t start = xTaskGetTickCount();
+    if(buses.buses_num == 0){
+        ESP_LOGE(TAG, "No buses available");
+        return ESP_FAIL;
+    }
+
+    if(buses.buses_num <= busid){
+        ESP_LOGE(TAG, "Bus identified by id: %d not found", busid);
+        return ESP_FAIL;
+    }
+
+    if(devid >= buses.bus[busid].ds18b20_device_num){
+        ESP_LOGE(TAG, "Device with number %d not found", devid);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    //taskENTER_CRITICAL(&buses.spinLock);
+    __sync_synchronize();
+    *temperature = measurements.measurements[busid][devid];
+    //taskEXIT_CRITICAL(&buses.spinLock);
+    TickType_t end = xTaskGetTickCount();
+    if(time != NULL){
+        *time = (end - start) * portTICK_PERIOD_MS;
+    }
+
+    return ESP_OK;
+}
+
 static int bus_read(int argc, char **argv) {
     int nerrors = arg_parse(argc, argv, (void **) &bus_read_args);
     if (nerrors != 0) {
@@ -281,9 +320,12 @@ static int bus_read(int argc, char **argv) {
     float temperature = 0;
     int time = 0;
 
-    taskENTER_CRITICAL(&buses.spinLock);
-    temperature = buses.measurements[busid][devid];
-    taskEXIT_CRITICAL(&buses.spinLock);
+    //taskENTER_CRITICAL(&buses.spinLock);
+    __sync_synchronize();
+    //temperature = measurements.measurements[busid][devid];
+    _bus_read_cached(busid, devid, &temperature, &time);
+    
+    //taskEXIT_CRITICAL(&buses.spinLock);
 
     printf("temperature read from Bus[%d].DS18B20[%d]: %.2fC, time: %dms\r\n", busid, devid, temperature, time);
 
@@ -683,6 +725,7 @@ static void ds18b20_measure_task(void *pvParameters) {
     }
 }
 
+/*
 static void ds18b20_process_task(void *pvParameters){
     const float ALPHA = LW_EMA_ALPHA;
     
@@ -690,14 +733,27 @@ static void ds18b20_process_task(void *pvParameters){
         ds18b20_measurement_t received_measurement;
         if (xQueueReceive(buses.measurement_queue, &received_measurement, portMAX_DELAY)) {
 
-            const float last = buses.measurements[received_measurement.bus_id][received_measurement.device_id];
-            taskENTER_CRITICAL(&buses.spinLock);
+            const float last = measurements.measurements[received_measurement.bus_id][received_measurement.device_id];
+            taskENTER_CRITICAL(&measurements.spinLock);
             if(isnanf(last) == 0){
-                buses.measurements[received_measurement.bus_id][received_measurement.device_id] = (ALPHA * received_measurement.temperature) + ((1 - ALPHA) * last);
+                measurements.measurements[received_measurement.bus_id][received_measurement.device_id] = (ALPHA * received_measurement.temperature) + ((1 - ALPHA) * last);
             } else {
-                buses.measurements[received_measurement.bus_id][received_measurement.device_id] = received_measurement.temperature;
+                measurements.measurements[received_measurement.bus_id][received_measurement.device_id] = received_measurement.temperature;
             }
-            taskEXIT_CRITICAL(&buses.spinLock);
+            taskEXIT_CRITICAL(&measurements.spinLock);
+        }
+    }
+}
+*/
+
+static void ds18b20_process_task(void *pvParameters){
+    for(;;){
+        ds18b20_measurement_t received_measurement;
+        if (xQueueReceive(buses.measurement_queue, &received_measurement, portMAX_DELAY)) {
+            //taskENTER_CRITICAL(&measurements.spinLock);
+            measurements.measurements[received_measurement.bus_id][received_measurement.device_id] = received_measurement.temperature;
+            __sync_synchronize();
+            //taskEXIT_CRITICAL(&measurements.spinLock);
         }
     }
 }
@@ -742,7 +798,7 @@ esp_err_t ds18b20_init(void) {
 
     for(size_t i = 0; i < ONEWIRE_MAX_BUS; i++){
         for(size_t j = 0; j < ONEWIRE_MAX_DS18B20; j++){
-            buses.measurements[i][j] = NAN;
+            measurements.measurements[i][j] = NAN;
         }
     }
 
@@ -768,4 +824,42 @@ esp_err_t ds18b20_bus_devices_count(int busid, int* count){
 
 esp_err_t ds18b20_bus_read(int busid, int devid, float* temperature){
     return _bus_read(busid, devid, temperature, NULL);
+}
+
+esp_err_t ds18b20_bus_read_cached(int busid, int devid, float* temperature){
+    return _bus_read_cached(busid, devid, temperature, NULL);
+}
+
+esp_err_t ds18b20_measurements_to_json(char* buffer, size_t size){
+    if(buses.buses_num == 0){
+        ESP_LOGE(TAG, "No buses available");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *buses_json = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "buses", buses_json);
+
+    for(size_t i = 0; i < buses.buses_num; i++){
+        cJSON *bus_json = cJSON_CreateObject();
+        cJSON_AddItemToArray(buses_json, bus_json);
+        cJSON_AddNumberToObject(bus_json, "gpio", buses.bus[i].bus_config.bus_gpio_num);
+        cJSON *devices_json = cJSON_CreateArray();
+        cJSON_AddItemToObject(bus_json, "devices", devices_json);
+        for(size_t j = 0; j < buses.bus[i].ds18b20_device_num; j++){
+            cJSON *device_json = cJSON_CreateObject();
+            cJSON_AddItemToArray(devices_json, device_json);
+            cJSON_AddNumberToObject(device_json, "id", j);
+
+            if(isnanf(measurements.measurements[i][j]) == 0){
+                cJSON_AddNumberToObject(device_json, "temperature", measurements.measurements[i][j]);
+            } else {
+                cJSON_AddStringToObject(device_json, "temperature", "NAN");
+            }
+        }
+    }
+
+    cJSON_PrintPreallocated(root, buffer, size, 0);
+
+    return ESP_OK;
 }

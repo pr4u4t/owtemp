@@ -20,6 +20,7 @@
 #include "cmd_wifi.h"
 #include "cmd_nvs.h"
 #include "cmd_ds18b20.h"
+#include "cmd_httpd.h"
 #include "console_settings.h"
 
 /*
@@ -113,6 +114,8 @@ void app_main(void)
     ds18b20_init();
     ds18b20_register();
 
+    httpd_register();
+    
     printf("\n"
            "This is an example of ESP-IDF console component.\n"
            "Type 'help' to get the list of commands.\n"

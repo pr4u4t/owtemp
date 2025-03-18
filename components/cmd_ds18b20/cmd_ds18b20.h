@@ -54,7 +54,7 @@ esp_err_t ds18b20_bus_count(int *count);
 esp_err_t ds18b20_bus_devices_count(int busid, int* count);
 
 /**
- * @brief Reads the temperature from a DS18B20 sensor on the specified bus.
+ * @brief Performs direct read of the temperature from a DS18B20 sensor on the specified bus.
  *
  * @param busid The ID of the bus to which the DS18B20 sensor is connected.
  * @param devid The ID of the DS18B20 sensor on the bus.
@@ -66,6 +66,33 @@ esp_err_t ds18b20_bus_devices_count(int busid, int* count);
  *     - ESP_FAIL: Failed to read temperature
  */
 esp_err_t ds18b20_bus_read(int busid, int devid, float* temperature);
+
+/**
+ * @brief Performs indirect read of the temperature from a DS18B20 sensor on the specified bus.
+ * This function reads the temperature from the cache and sensor reading in background task must be enabled.
+ *
+ * @param busid The ID of the bus to which the DS18B20 sensor is connected.
+ * @param devid The ID of the DS18B20 sensor on the bus.
+ * @param temperature Pointer to a float where the read temperature will be stored.
+ *
+ * @return
+ *     - ESP_OK: Success
+ *     - ESP_ERR_INVALID_ARG: Invalid arguments
+ *     - ESP_FAIL: Failed to read temperature
+ */
+esp_err_t ds18b20_bus_read_cached(int busid, int devid, float* temperature);
+
+/** 
+ * @brief Get the DS18B20 measurements in JSON format.
+ * 
+ * @param buffer Pointer to a buffer where the JSON string will be stored.
+ * @param size Size of the buffer.
+ * 
+ * @return
+ *    - ESP_OK: Success
+ *    - ESP_ERR_INVALID_ARG: Invalid arguments
+*/
+esp_err_t ds18b20_measurements_to_json(char* buffer, size_t size);
 
 #ifdef __cplusplus
 }
